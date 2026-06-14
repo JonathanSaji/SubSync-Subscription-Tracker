@@ -1,8 +1,5 @@
 
-
-const fs = require('fs');
-const path = require('path');
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
 
 const VERBOSE_REMINDER_LOGS = String(process.env.VERBOSE_REMINDER_LOGS || '').toLowerCase() === 'true';
 
@@ -88,13 +85,8 @@ async function sendEmailReminders(pool) {
   const today = new Date();
   today.setHours(0,0,0,0);
 
-  const transporter = nodemailer.createTransport({
-    service: 'gmail',
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS
-    }
-  });
+  const resend = new Resend(process.env.RESEND_API_KEY);
+  const fromAddress = process.env.RESEND_FROM_EMAIL || 'SubSync <onboarding@resend.dev>';
 
   for (const sub of subscriptions) {
     if (!sub.id || !sub.user_id || !sub.date) {
@@ -218,15 +210,16 @@ SubSync`;
   </body>
 </html>`;
 
-        const info = await transporter.sendMail({
-          from: `"SubSync" <${process.env.EMAIL_USER}>`,
+        const { data, error } = await resend.emails.send({
+          from: fromAddress,
           to: userEmail,
           subject: `Subsync Reminder: ${sub.name} renews tomorrow.`,
           text: textBody,
           html: htmlBody
         });
+        if (error) throw new Error(error.message || JSON.stringify(error));
         stats.sent += 1;
-        console.log(`[Email Reminder] Reminder sent to ${userEmail} for ${sub.name}: ${info.messageId}`);
+        console.log(`[Email Reminder] Reminder sent to ${userEmail} for ${sub.name}: ${data && data.id}`);
 
         // Update the subscription to mark reminder as sent for this date
         await pool.query(

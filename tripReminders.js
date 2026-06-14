@@ -1,27 +1,7 @@
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
 const dns = require('dns');
 
-let smtpIpv4PreferenceApplied = false;
 
-function ensureSmtpIpv4Preference() {
-  if (smtpIpv4PreferenceApplied) return;
-
-  const isProductionRuntime = process.env.NODE_ENV === 'production' || Boolean(process.env.RENDER);
-  if (!isProductionRuntime) return;
-
-  try {
-    dns.setDefaultResultOrder('ipv4first');
-    smtpIpv4PreferenceApplied = true;
-    console.log('[Trip Reminder][SMTP] DNS result order set to ipv4first');
-  } catch (err) {
-    console.warn('[Trip Reminder][SMTP] Could not set dns result order:', err && err.message ? err.message : err);
-  }
-}
-
-function lookupIpv4Only(hostname, options, callback) {
-  const normalizedOptions = typeof options === 'object' && options !== null ? options : {};
-  return dns.lookup(hostname, { ...normalizedOptions, family: 4, all: false }, callback);
-}
 
 function toDateOnly(value) {
   if (!value) return null;
@@ -477,50 +457,28 @@ async function createTripNotification(pool, { userId, tripId, type, title, messa
   );
 }
 
-function createMailer() {
-  ensureSmtpIpv4Preference();
-
-  return nodemailer.createTransport({
-    host: 'smtp.gmail.com',
-    port: 465,
-    secure: true,
-    family: 4,
-    lookup: lookupIpv4Only,
-    auth: {
-      user: process.env.EMAIL_USER,
-      pass: process.env.EMAIL_PASS
-    }
-  });
+function createResendClient() {
+  return new Resend(process.env.RESEND_API_KEY);
 }
 
-async function sendTripEmail(mailer, userEmail, emailPayload) {
+async function sendTripEmail(resendClient, userEmail, emailPayload) {
   if (!userEmail) return false;
 
-  try {
-    await mailer.sendMail({
-      from: `"TrackerSync" <${process.env.EMAIL_USER}>`,
-      to: userEmail,
-      subject: emailPayload.subject,
-      text: emailPayload.text,
-      html: emailPayload.html
-    });
-  } catch (err) {
-    const smtpHost = mailer?.options?.host || 'smtp.gmail.com';
-    const smtpPort = mailer?.options?.port || 465;
-    const familyHint = typeof err?.address === 'string' && err.address.includes(':') ? 'ipv6' : 'ipv4_or_unknown';
+  const fromAddress = process.env.RESEND_FROM_EMAIL || 'TrackerSync <onboarding@resend.dev>';
 
-    console.error('[Trip Reminder][SMTP] sendMail failed', {
-      host: smtpHost,
-      port: smtpPort,
-      familyHint,
-      code: err?.code,
-      errno: err?.errno,
-      syscall: err?.syscall,
-      address: err?.address,
-      error: err?.message
-    });
+  const { error } = await resendClient.emails.send({
+    from: fromAddress,
+    to: userEmail,
+    subject: emailPayload.subject,
+    text: emailPayload.text,
+    html: emailPayload.html
+  });
 
-    throw err;
+  if (error) {
+    console.error('[Trip Reminder][Resend] sendMail failed', {
+      error: error.message || JSON.stringify(error)
+    });
+    throw new Error(error.message || JSON.stringify(error));
   }
 
   return true;
@@ -674,13 +632,13 @@ async function processTripReminders(pool, options = {}) {
     };
   }
 
-  const mailer = createMailer();
+  const resendClient = createResendClient();
   const results = [];
   let emailsSent = 0;
 
   for (const participant of tripParticipants) {
     try {
-      const result = await processParticipant(pool, mailer, participant, options);
+      const result = await processParticipant(pool, resendClient, participant, options);
       if (result.sent) emailsSent += 1;
       results.push({
         tripId: Number(participant.trip_id),
